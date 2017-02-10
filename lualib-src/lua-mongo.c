@@ -1,6 +1,7 @@
+#include "skynet_malloc.h"
+
 #include <lua.h>
 #include <lauxlib.h>
-#include "luacompat52.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -42,7 +43,7 @@ struct buffer {
 };
 
 static inline uint32_t
-to_little_endian(uint32_t v) {
+little_endian(uint32_t v) {
 	union {
 		uint32_t v;
 		uint8_t b[4];
@@ -54,7 +55,7 @@ to_little_endian(uint32_t v) {
 typedef void * document;
 
 static inline uint32_t
-get_length(const document buffer) {
+get_length(document buffer) {
 	union {
 		uint32_t v;
 		uint8_t b[4];
@@ -66,7 +67,7 @@ get_length(const document buffer) {
 static inline void
 buffer_destroy(struct buffer *b) {
 	if (b->ptr != b->buffer) {
-		free(b->ptr);
+		skynet_free(b->ptr);
 	}
 }
 
@@ -86,10 +87,10 @@ buffer_reserve(struct buffer *b, int sz) {
 	} while (b->cap <= b->size + sz);
 
 	if (b->ptr == b->buffer) {
-		b->ptr = malloc(b->cap);
+		b->ptr = skynet_malloc(b->cap);
 		memcpy(b->ptr, b->buffer, b->size);
 	} else {
-		b->ptr = realloc(b->ptr, b->cap);
+		b->ptr = skynet_realloc(b->ptr, b->cap);
 	}
 }
 
@@ -222,8 +223,8 @@ op_reply(lua_State *L) {
 		return 1;
 	}
 
-	int id = to_little_endian(reply->response_id);
-	int flags = to_little_endian(reply->flags);
+	int id = little_endian(reply->response_id);
+	int flags = little_endian(reply->flags);
 	if (flags & REPLY_QUERYFAILURE) {
 		lua_pushboolean(L,0);
 		lua_pushinteger(L, id);
@@ -231,8 +232,8 @@ op_reply(lua_State *L) {
 		return 3;
 	}
 
-	int starting_from = to_little_endian(reply->starting);
-	int number = to_little_endian(reply->number);
+	int starting_from = little_endian(reply->starting);
+	int number = little_endian(reply->number);
 	int sz = (int)data_len - sizeof(*reply);
 	const uint8_t * doc = (const uint8_t *)(reply+1);
 
@@ -242,7 +243,7 @@ op_reply(lua_State *L) {
 			lua_pushlightuserdata(L, (void *)doc);
 			lua_rawseti(L, 2, i);
 
-			int32_t doc_len = get_length((const document)doc);
+			int32_t doc_len = get_length((document)doc);
 
 			doc += doc_len;
 			sz -= doc_len;
@@ -259,6 +260,13 @@ op_reply(lua_State *L) {
 			lua_pushnil(L);
 			lua_rawseti(L, 2, i);
 		}
+	} else {
+		if (sz >= 4) {
+			sz -= get_length((document)doc);
+		}
+	}
+	if (sz != 0) {
+		return luaL_error(L, "Invalid result bson document");
 	}
 	lua_pushboolean(L,1);
 	lua_pushinteger(L, id);
@@ -498,9 +506,9 @@ op_insert(lua_State *L) {
 		int i;
 		for (i=1;i<=s;i++) {
 			lua_rawgeti(L,3,i);
-			document doc = lua_touserdata(L,3);
+			document doc = lua_touserdata(L,-1);
+			lua_pop(L,1);	// must call lua_pop before luaL_addlstring, because addlstring may change stack top
 			luaL_addlstring(&b, (const char *)doc, get_length(doc));
-			lua_pop(L,1);
 		}
 	}
 
@@ -516,27 +524,9 @@ reply_length(lua_State *L) {
 	const char * rawlen_str = luaL_checkstring(L, 1);
 	int rawlen = 0;
 	memcpy(&rawlen, rawlen_str, sizeof(int));
-	int length = to_little_endian(rawlen);
+	int length = little_endian(rawlen);
 	lua_pushinteger(L, length - 4);
 	return 1;
-}
-
-static int
-copy_result(lua_State *L) {
-	if (lua_type(L,2) == LUA_TNIL)
-		return 0;
-	int n1 = lua_rawlen(L,1);
-	int n2 = lua_rawlen(L,2);
-	int i;
-	for (i=0;i<n1;i++) {
-		lua_rawgeti(L,1,i+1);
-		lua_rawseti(L,2,i+1);
-	}
-	for (i=n1;i<n2;i++) {
-		lua_pushnil(L);
-		lua_rawseti(L,2,i+1);
-	}
-	return 0;
 }
 
 int
@@ -551,7 +541,6 @@ luaopen_mongo_driver(lua_State *L) {
 		{ "update", op_update },
 		{ "insert", op_insert },
 		{ "length", reply_length },
-		{ "copy_result", copy_result },
 		{ NULL, NULL },
 	};
 
